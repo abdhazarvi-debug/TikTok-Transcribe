@@ -1,0 +1,68 @@
+name: Feasibility Gate and Android Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  feasibility-gate:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.gate.outputs.should_build }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check measured Urdu quality gate
+        id: gate
+        shell: bash
+        run: |
+          if grep -qx 'GO_DECISION: GO' docs/PHASE_0_RESULTS.md; then
+            echo 'should_build=true' >> "$GITHUB_OUTPUT"
+            echo 'Phase 0 gate says GO. Android build may proceed.' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo 'should_build=false' >> "$GITHUB_OUTPUT"
+            echo 'Android build/test NOT RUN: docs/PHASE_0_RESULTS.md does not contain GO_DECISION: GO.' >> "$GITHUB_STEP_SUMMARY"
+            echo 'A successful feasibility-gate job is not an Android build pass.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  android-build:
+    needs: feasibility-gate
+    if: needs.feasibility-gate.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install pinned NDK and CMake
+        run: |
+          sdkmanager --install "ndk;27.0.12077973" "cmake;3.22.1"
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> "$GITHUB_ENV"
+      - name: Verify Android project wrapper exists
+        run: |
+          if [ ! -f ./gradlew ]; then
+            echo 'Phase 0 is GO, but ./gradlew is missing. Android project setup is incomplete.' >&2
+            exit 1
+          fi
+          chmod +x ./gradlew
+      - name: Run JVM unit tests
+        run: ./gradlew testDebugUnitTest
+      - name: Build debug APK
+        run: ./gradlew assembleDebug
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiktok-transcript-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+# CI does not run instrumented tests or live TikTok URLs. Those require a configured
+# device/emulator or recorded downloader fixtures and must be reported separately.
